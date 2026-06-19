@@ -7,12 +7,19 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 type OrderStatus = 'pending' | 'preparing' | 'ready' | 'on_the_way' | 'delivered' | 'cancelled';
 
+interface CartSnapshotItem {
+  menu_item_id: string;
+  name: string;
+  quantity: number;
+  unit_price: number;
+}
+
 interface Order {
   id: string;
   created_at: string;
   status: OrderStatus;
   total_amount: number;
-  order_items: { name: string; quantity: number }[];
+  cart_snapshot: CartSnapshotItem[];
   restaurant: { name: string };
   customer?: { full_name: string };
 }
@@ -31,7 +38,7 @@ const TicketTimer = ({ createdAt }: { createdAt: string }) => {
       const elapsed = Math.floor((Date.now() - new Date(createdAt).getTime()) / 60000);
       setMinutes(elapsed > 0 ? elapsed : 0);
     };
-    
+
     calculateMinutes();
     const interval = setInterval(calculateMinutes, 60000);
     return () => clearInterval(interval);
@@ -48,32 +55,20 @@ const TicketTimer = ({ createdAt }: { createdAt: string }) => {
 export default function KDSPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [isConnected, setIsConnected] = useState(false);
+  const [isAuthed, setIsAuthed] = useState(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
 
-  // Maintain purity and avoid cascading renders by making the initial set async
   useEffect(() => {
     let isMounted = true;
-
-    const timer = setTimeout(() => {
-      if (isMounted) setCurrentTime(Date.now());
-    }, 0);
-
-    const interval = setInterval(() => {
-      if (isMounted) setCurrentTime(Date.now());
-    }, 60000);
-
-    return () => {
-      isMounted = false;
-      clearTimeout(timer);
-      clearInterval(interval);
-    };
+    const timer = setTimeout(() => { if (isMounted) setCurrentTime(Date.now()); }, 0);
+    const interval = setInterval(() => { if (isMounted) setCurrentTime(Date.now()); }, 60000);
+    return () => { isMounted = false; clearTimeout(timer); clearInterval(interval); };
   }, []);
 
   const playAlert = useCallback(() => {
     try {
       const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const ctx = new AudioContextClass();
-      
       const playTone = (freq: number, startTime: number) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
@@ -86,65 +81,82 @@ export default function KDSPage() {
         osc.start(startTime);
         osc.stop(startTime + 0.5);
       };
-
       playTone(880, ctx.currentTime);
       playTone(1046.50, ctx.currentTime + 0.15);
     } catch {
-      console.warn('Audio playback blocked by browser policy. Click anywhere on the page to enable.');
+      console.warn('Audio playback blocked by browser policy.');
     }
   }, []);
 
+  // Sign in as KDS staff user, then fetch orders and subscribe
   useEffect(() => {
-    async function fetchOrders() {
+    let channelCleanup: (() => void) | null = null;
+
+    async function init() {
+      // 1. Sign in with KDS credentials from env
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: process.env.NEXT_PUBLIC_KDS_EMAIL!,
+        password: process.env.NEXT_PUBLIC_KDS_PASSWORD!,
+      });
+
+      if (signInError) {
+        console.error('KDS sign-in failed:', signInError.message);
+        return;
+      }
+
+      setIsAuthed(true);
+
+      // 2. Fetch existing active orders
       const { data, error } = await supabase
         .from('orders')
         .select('*, restaurant:restaurants(name), customer:profiles!customer_id(full_name)')
         .in('status', ['pending', 'preparing', 'ready', 'cancelled']);
-        
+
       if (error) {
         console.error('Failed to fetch initial orders:', error.message);
-        return;
+      } else if (data) {
+        setOrders(data as Order[]);
       }
-      if (data) setOrders(data as Order[]);
+
+      // 3. Subscribe to realtime changes
+      const channel = supabase
+        .channel('kds-orders')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload: unknown) => {
+          const typedPayload = payload as RealtimePayload;
+
+          if (typedPayload.eventType === 'INSERT') {
+            const hydrateAndSetOrder = async () => {
+              const { data } = await supabase
+                .from('orders')
+                .select('*, restaurant:restaurants(name), customer:profiles!customer_id(full_name)')
+                .eq('id', typedPayload.new.id)
+                .single();
+
+              if (data) {
+                setOrders((prev) => [...prev, data as Order]);
+                playAlert();
+              }
+            };
+            hydrateAndSetOrder();
+          }
+
+          if (typedPayload.eventType === 'UPDATE') {
+            setOrders((prev) =>
+              ['on_the_way', 'delivered'].includes(typedPayload.new.status)
+                ? prev.filter((o) => o.id !== typedPayload.new.id)
+                : prev.map((o) => o.id === typedPayload.new.id ? { ...o, ...typedPayload.new } : o)
+            );
+          }
+        })
+        .subscribe((status) => {
+          setIsConnected(status === 'SUBSCRIBED');
+        });
+
+      channelCleanup = () => { supabase.removeChannel(channel); };
     }
-    
-    fetchOrders();
 
-    const channel = supabase
-      .channel('kds-orders')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload: unknown) => {
-        const typedPayload = payload as RealtimePayload;
-        
-        if (typedPayload.eventType === 'INSERT') {
-          // The realtime payload lacks joined data. We must fetch the full profile specifically for this new order.
-          const hydrateAndSetOrder = async () => {
-            const { data } = await supabase
-              .from('orders')
-              .select('*, restaurant:restaurants(name), customer:profiles!customer_id(full_name)')
-              .eq('id', typedPayload.new.id)
-              .single();
-
-            if (data) {
-              setOrders((prev) => [...prev, data as Order]);
-              playAlert(); // Trigger sound only after data is ready
-            }
-          };
-          
-          hydrateAndSetOrder();
-        }
-        if (typedPayload.eventType === 'UPDATE') {
-          setOrders((prev) => 
-            ['on_the_way', 'delivered'].includes(typedPayload.new.status)
-              ? prev.filter((o) => o.id !== typedPayload.new.id)
-              : prev.map((o) => o.id === typedPayload.new.id ? { ...o, ...typedPayload.new } : o)
-          );
-        }
-      })
-      .subscribe((status) => {
-        setIsConnected(status === 'SUBSCRIBED');
-      });
-
-    return () => { supabase.removeChannel(channel); };
+    init();
+    return () => { if (channelCleanup) channelCleanup(); };
   }, [playAlert]);
 
   const updateStatus = async (id: string, status: OrderStatus) => {
@@ -160,7 +172,7 @@ export default function KDSPage() {
 
   const activeOrders = orders.filter((o) => {
     if (o.status === 'cancelled') {
-      if (currentTime === 0) return true; 
+      if (currentTime === 0) return true;
       const minsElapsed = (currentTime - new Date(o.created_at).getTime()) / 60000;
       return minsElapsed <= 30;
     }
@@ -173,6 +185,14 @@ export default function KDSPage() {
     { id: 'ready', title: 'Listos', borderColor: '#06D6A0' },
     { id: 'cancelled', title: 'Cancelados', borderColor: '#6B7280' },
   ];
+
+  if (!isAuthed) {
+    return (
+      <main className="p-8 bg-slate-950 min-h-screen text-white flex items-center justify-center">
+        <div className="text-slate-400 text-lg animate-pulse">Conectando KDS...</div>
+      </main>
+    );
+  }
 
   return (
     <main className="p-8 bg-slate-950 min-h-screen text-white overflow-x-hidden">
@@ -206,8 +226,8 @@ export default function KDSPage() {
               </h2>
 
               {colOrders.map((order) => (
-                <Card 
-                  key={order.id} 
+                <Card
+                  key={order.id}
                   className="bg-slate-900 border-y border-r border-slate-800 text-white shadow-md relative overflow-hidden"
                   style={{ borderLeft: `4px solid ${col.borderColor}` }}
                 >
@@ -225,7 +245,7 @@ export default function KDSPage() {
 
                   <CardContent>
                     <div className="space-y-1.5 mb-4">
-                      {order.order_items.map((item, i) => (
+                      {order.cart_snapshot?.map((item, i) => (
                         <div key={i} className={`text-sm font-medium ${isCancelled ? 'line-through text-slate-500' : 'text-slate-200'}`}>
                           <span className={isCancelled ? '' : 'text-white font-bold'}>{item.quantity}x</span> {item.name}
                         </div>
