@@ -94,7 +94,7 @@ export default function KDSPage() {
     // Find any membership (owner or staff) for this user
     const { data: membership } = await supabase
       .from('memberships')
-      .select('restaurant_id, restaurants(id, name)')
+      .select('restaurant_id, role, restaurants(id, name)')
       .eq('user_id', user.id)
       .in('role', ['owner', 'staff'])
       .limit(1)
@@ -103,6 +103,12 @@ export default function KDSPage() {
     if (!membership) {
       setNoMembership(true);
       setAuthLoading(false);
+      return;
+    }
+
+    // Owners don't belong on the KDS — send them to their panel
+    if (membership.role === 'owner') {
+      window.location.href = '/owner';
       return;
     }
 

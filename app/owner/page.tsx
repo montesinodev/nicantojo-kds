@@ -46,6 +46,22 @@ export default function OwnerPage() {
   }, []);
 
   async function loadRestaurants() {
+    // Check if this user is actually staff — if so, they belong on the KDS
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      const { data: membership } = await supabase
+        .from('memberships')
+        .select('role')
+        .eq('user_id', user.id)
+        .limit(1)
+        .maybeSingle();
+
+      if (membership?.role === 'staff') {
+        window.location.href = '/';
+        return;
+      }
+    }
+
     const { data: memberships } = await supabase
       .from('memberships')
       .select('restaurant_id')
