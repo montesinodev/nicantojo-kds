@@ -7,8 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 type OrderStatus = 'pending' | 'preparing' | 'ready' | 'on_the_way' | 'delivered' | 'cancelled';
 
-interface CartSnapshotItem {
-  menu_item_id: string;
+interface SnapshotItem {
   name: string;
   quantity: number;
   unit_price: number;
@@ -18,269 +17,401 @@ interface Order {
   id: string;
   created_at: string;
   status: OrderStatus;
+  delivery_address: string;
   total_amount: number;
-  cart_snapshot: CartSnapshotItem[];
-  restaurant: { name: string };
-  customer?: { full_name: string };
+  cart_snapshot: SnapshotItem[];
 }
 
-interface RealtimePayload {
-  eventType: 'INSERT' | 'UPDATE' | 'DELETE';
-  new: Order;
-  old?: { id: string };
+interface Restaurant {
+  id: string;
+  name: string;
 }
 
-const TicketTimer = ({ createdAt }: { createdAt: string }) => {
-  const [minutes, setMinutes] = useState(0);
-
-  useEffect(() => {
-    const calculateMinutes = () => {
-      const elapsed = Math.floor((Date.now() - new Date(createdAt).getTime()) / 60000);
-      setMinutes(elapsed > 0 ? elapsed : 0);
-    };
-
-    calculateMinutes();
-    const interval = setInterval(calculateMinutes, 60000);
-    return () => clearInterval(interval);
-  }, [createdAt]);
-
-  const isLate = minutes > 15;
-  return (
-    <div className={`text-xs font-bold px-2 py-1 rounded-md ${isLate ? 'bg-red-950 text-red-400 animate-pulse' : 'bg-slate-800 text-slate-300'}`}>
-      ⏱ {minutes} min
-    </div>
-  );
+const STATUS_LABELS: Record<OrderStatus, string> = {
+  pending: 'Pendiente',
+  preparing: 'Preparando',
+  ready: 'Listo',
+  on_the_way: 'En camino',
+  delivered: 'Entregado',
+  cancelled: 'Cancelado',
 };
 
+const STATUS_COLORS: Record<OrderStatus, string> = {
+  pending: 'bg-yellow-900/40 border-yellow-700 text-yellow-400',
+  preparing: 'bg-blue-900/40 border-blue-700 text-blue-400',
+  ready: 'bg-green-900/40 border-green-700 text-green-400',
+  on_the_way: 'bg-purple-900/40 border-purple-700 text-purple-400',
+  delivered: 'bg-slate-800 border-slate-700 text-slate-500',
+  cancelled: 'bg-slate-800 border-slate-700 text-slate-500',
+};
+
+const NEXT_STATUS: Partial<Record<OrderStatus, OrderStatus>> = {
+  pending: 'preparing',
+  preparing: 'ready',
+  ready: 'on_the_way',
+};
+
+const NEXT_STATUS_LABEL: Partial<Record<OrderStatus, string>> = {
+  pending: 'Iniciar preparación',
+  preparing: 'Marcar como listo',
+  ready: 'Entregar a repartidor',
+};
+
+const ACTIVE_STATUSES: OrderStatus[] = ['pending', 'preparing', 'ready'];
+
 export default function KDSPage() {
+  // Auth state
+  const [session, setSession] = useState<any>(null);
+  const [restaurant, setRestaurant] = useState<Restaurant | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [noMembership, setNoMembership] = useState(false);
+
+  // Login form
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  // KDS state
   const [orders, setOrders] = useState<Order[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
-  const [isAuthed, setIsAuthed] = useState(false);
-  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [isLive, setIsLive] = useState(false);
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
 
+  // ── Auth init ──────────────────────────────────────────────
   useEffect(() => {
-    let isMounted = true;
-    const timer = setTimeout(() => { if (isMounted) setCurrentTime(Date.now()); }, 0);
-    const interval = setInterval(() => { if (isMounted) setCurrentTime(Date.now()); }, 60000);
-    return () => { isMounted = false; clearTimeout(timer); clearInterval(interval); };
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      if (data.session) resolveRestaurant();
+      else setAuthLoading(false);
+    });
   }, []);
 
-  const playAlert = useCallback(() => {
-    try {
-      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const ctx = new AudioContextClass();
-      const playTone = (freq: number, startTime: number) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(freq, startTime);
-        gain.gain.setValueAtTime(0.5, startTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.4);
-        osc.start(startTime);
-        osc.stop(startTime + 0.5);
-      };
-      playTone(880, ctx.currentTime);
-      playTone(1046.50, ctx.currentTime + 0.15);
-    } catch {
-      console.warn('Audio playback blocked by browser policy.');
-    }
-  }, []);
+  async function resolveRestaurant() {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { setAuthLoading(false); return; }
 
-  // Sign in as KDS staff user, then fetch orders and subscribe
+    // Find any membership (owner or staff) for this user
+    const { data: membership } = await supabase
+      .from('memberships')
+      .select('restaurant_id, restaurants(id, name)')
+      .eq('user_id', user.id)
+      .in('role', ['owner', 'staff'])
+      .limit(1)
+      .maybeSingle();
+
+    if (!membership) {
+      setNoMembership(true);
+      setAuthLoading(false);
+      return;
+    }
+
+    const rest = membership.restaurants as unknown as Restaurant;
+    setRestaurant(rest);
+    setAuthLoading(false);
+  }
+
+  // ── Login ──────────────────────────────────────────────────
+  async function handleLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setLoginLoading(true);
+    setLoginError('');
+
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+
+    if (error) {
+      setLoginError('Credenciales incorrectas. Verifica tu correo y contraseña.');
+      setLoginLoading(false);
+      return;
+    }
+
+    setSession(data.session);
+    setAuthLoading(true);
+    await resolveRestaurant();
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    setSession(null);
+    setRestaurant(null);
+    setOrders([]);
+    setIsLive(false);
+    setNoMembership(false);
+    setEmail('');
+    setPassword('');
+  }
+
+  // ── Orders ─────────────────────────────────────────────────
+  const loadOrders = useCallback(async () => {
+    if (!restaurant) return;
+    setOrdersLoading(true);
+
+    const { data } = await supabase
+      .from('orders')
+      .select('id, created_at, status, delivery_address, total_amount, cart_snapshot')
+      .eq('restaurant_id', restaurant.id)
+      .in('status', ACTIVE_STATUSES)
+      .order('created_at', { ascending: true });
+
+    setOrders(data || []);
+    setOrdersLoading(false);
+  }, [restaurant]);
+
+  // Load orders + subscribe once restaurant is known
   useEffect(() => {
-    let channelCleanup: (() => void) | null = null;
+    if (!restaurant) return;
 
-    async function init() {
-      // 1. Sign in with KDS credentials from env
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: process.env.NEXT_PUBLIC_KDS_EMAIL!,
-        password: process.env.NEXT_PUBLIC_KDS_PASSWORD!,
-      });
+    loadOrders();
 
-      if (signInError) {
-        console.error('KDS sign-in failed:', signInError.message);
-        return;
-      }
+    const channel = supabase
+      .channel(`kds-${restaurant.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'orders',
+          filter: `restaurant_id=eq.${restaurant.id}`,
+        },
+        () => {
+          loadOrders();
+          // Sound alert for new orders
+          try { new Audio('/sounds/ding.mp3').play(); } catch (_) {}
+        }
+      )
+      .subscribe((status) => setIsLive(status === 'SUBSCRIBED'));
 
-      setIsAuthed(true);
+    return () => { supabase.removeChannel(channel); };
+  }, [restaurant, loadOrders]);
 
-      // 2. Fetch existing active orders
-      const { data, error } = await supabase
-        .from('orders')
-        .select('*, restaurant:restaurants(name), customer:profiles!customer_id(full_name)')
-        .in('status', ['pending', 'preparing', 'ready', 'cancelled']);
+  async function advanceStatus(order: Order) {
+    const next = NEXT_STATUS[order.status];
+    if (!next) return;
+    setUpdatingId(order.id);
+    await supabase.from('orders').update({ status: next }).eq('id', order.id);
+    setUpdatingId(null);
+    loadOrders();
+  }
 
-      if (error) {
-        console.error('Failed to fetch initial orders:', error.message);
-      } else if (data) {
-        setOrders(data as Order[]);
-      }
-
-      // 3. Subscribe to realtime changes
-      const channel = supabase
-        .channel('kds-orders')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, (payload: unknown) => {
-          const typedPayload = payload as RealtimePayload;
-
-          if (typedPayload.eventType === 'INSERT') {
-            const hydrateAndSetOrder = async () => {
-              const { data } = await supabase
-                .from('orders')
-                .select('*, restaurant:restaurants(name), customer:profiles!customer_id(full_name)')
-                .eq('id', typedPayload.new.id)
-                .single();
-
-              if (data) {
-                setOrders((prev) => [...prev, data as Order]);
-                playAlert();
-              }
-            };
-            hydrateAndSetOrder();
-          }
-
-          if (typedPayload.eventType === 'UPDATE') {
-            setOrders((prev) =>
-              ['on_the_way', 'delivered'].includes(typedPayload.new.status)
-                ? prev.filter((o) => o.id !== typedPayload.new.id)
-                : prev.map((o) => o.id === typedPayload.new.id ? { ...o, ...typedPayload.new } : o)
-            );
-          }
-        })
-        .subscribe((status) => {
-          setIsConnected(status === 'SUBSCRIBED');
-        });
-
-      channelCleanup = () => { supabase.removeChannel(channel); };
-    }
-
-    init();
-    return () => { if (channelCleanup) channelCleanup(); };
-  }, [playAlert]);
-
-  const updateStatus = async (id: string, status: OrderStatus) => {
-    const { error } = await supabase.from('orders').update({ status }).eq('id', id);
-    if (error) console.error('Failed to update order status:', error.message);
-  };
-
-  const getFriendlyId = (uuid: string) => parseInt(uuid.split('-')[0], 16) % 10000;
-
-  const formatTime = (dateString: string) => {
-    return new Date(dateString).toLocaleTimeString('es-NI', { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const activeOrders = orders.filter((o) => {
-    if (o.status === 'cancelled') {
-      if (currentTime === 0) return true;
-      const minsElapsed = (currentTime - new Date(o.created_at).getTime()) / 60000;
-      return minsElapsed <= 30;
-    }
-    return true;
-  });
-
-  const columns: { id: OrderStatus; title: string; borderColor: string }[] = [
-    { id: 'pending', title: 'Nuevos', borderColor: '#E63946' },
-    { id: 'preparing', title: 'En Cocina', borderColor: '#F4A261' },
-    { id: 'ready', title: 'Listos', borderColor: '#06D6A0' },
-    { id: 'cancelled', title: 'Cancelados', borderColor: '#6B7280' },
-  ];
-
-  if (!isAuthed) {
+  // ── Render: loading ────────────────────────────────────────
+  if (authLoading) {
     return (
-      <main className="p-8 bg-slate-950 min-h-screen text-white flex items-center justify-center">
-        <div className="text-slate-400 text-lg animate-pulse">Conectando KDS...</div>
-      </main>
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <p className="text-slate-500 text-sm animate-pulse">Conectando KDS...</p>
+      </div>
     );
   }
 
+  // ── Render: login ──────────────────────────────────────────
+  if (!session) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+        <Card className="w-full max-w-md bg-slate-900 border-slate-800">
+          <CardHeader className="text-center pb-2">
+            <div className="w-12 h-12 bg-slate-800 border border-slate-700 rounded-xl flex items-center justify-center mx-auto mb-3">
+              <span className="text-2xl">🖥️</span>
+            </div>
+            <CardTitle className="text-white text-xl">Acceso KDS</CardTitle>
+            <p className="text-slate-500 text-sm mt-1">
+              Sistema de visualización de pedidos — NicAntojo
+            </p>
+          </CardHeader>
+          <CardContent className="pt-4">
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label className="text-sm text-slate-400 mb-1 block">Correo electrónico</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  autoComplete="email"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-slate-500"
+                  placeholder="cocina@restaurante.com"
+                />
+              </div>
+              <div>
+                <label className="text-sm text-slate-400 mb-1 block">Contraseña</label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  autoComplete="current-password"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-slate-500"
+                  placeholder="••••••••"
+                />
+              </div>
+              {loginError && (
+                <p className="text-red-400 text-sm bg-red-900/20 border border-red-800 rounded-lg px-3 py-2">
+                  {loginError}
+                </p>
+              )}
+              <Button
+                type="submit"
+                disabled={loginLoading}
+                className="w-full bg-slate-700 hover:bg-slate-600 text-white font-semibold py-2.5"
+              >
+                {loginLoading ? 'Iniciando sesión...' : 'Entrar al KDS'}
+              </Button>
+            </form>
+
+            <p className="text-center text-slate-600 text-xs mt-6">
+              ¿Eres propietario?{' '}
+              <a href="/owner" className="text-slate-400 hover:text-white underline">
+                Ir al panel de propietario
+              </a>
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // ── Render: no membership ──────────────────────────────────
+  if (noMembership) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+        <div className="text-center max-w-sm">
+          <div className="text-4xl mb-4">⚠️</div>
+          <p className="text-white font-medium mb-2">Sin acceso a restaurante</p>
+          <p className="text-slate-500 text-sm mb-6">
+            Tu cuenta no está vinculada a ningún restaurante. Pídele al propietario que te agregue como staff.
+          </p>
+          <Button
+            onClick={handleLogout}
+            variant="ghost"
+            className="text-slate-400 hover:text-white"
+          >
+            Cerrar sesión
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Render: KDS board ──────────────────────────────────────
   return (
-    <main className="p-8 bg-slate-950 min-h-screen text-white overflow-x-hidden">
-      <header className="mb-8 flex items-center justify-between border-b border-slate-800 pb-6">
-        <div className="flex items-center gap-6">
-          <h1 className="text-3xl font-black tracking-tight text-[#E63946]">
-            NicAntojo <span className="text-white">KDS</span>
-          </h1>
-          <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold border ${
-            isConnected ? 'bg-green-950 border-green-700 text-green-400' : 'bg-red-950 border-red-700 text-red-400'
-          }`}>
-            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
-            {isConnected ? 'LIVE' : 'OFFLINE'}
+    <div className="min-h-screen bg-slate-950 text-white">
+      {/* Header */}
+      <div className="border-b border-slate-800 bg-slate-900 px-6 py-3 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="text-lg">🖥️</span>
+          <div>
+            <h1 className="text-white font-semibold text-sm leading-none">{restaurant?.name}</h1>
+            <p className="text-slate-500 text-xs mt-0.5">KDS · Pedidos activos</p>
           </div>
         </div>
-        <div className="text-sm font-mono text-slate-400">Total Tickets: {activeOrders.length}</div>
-      </header>
 
-      <div className="grid grid-cols-4 gap-6">
-        {columns.map((col) => {
-          const colOrders = activeOrders.filter((o) => o.status === col.id);
-          const isCancelled = col.id === 'cancelled';
+        <div className="flex items-center gap-4">
+          {/* Live indicator */}
+          <div className="flex items-center gap-2">
+            <span
+              className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}
+            />
+            <span className="text-xs text-slate-500">{isLive ? 'EN VIVO' : 'DESCONECTADO'}</span>
+          </div>
 
-          return (
-            <div key={col.id} className={`space-y-4 ${isCancelled ? 'opacity-70' : ''}`}>
-              <h2 className="text-xl font-semibold text-slate-300 mb-4 flex items-center justify-between">
-                {col.title}
-                <span className="bg-slate-800 text-sm py-0.5 px-2 rounded-md border border-slate-700">
-                  {colOrders.length}
-                </span>
-              </h2>
+          <Button
+            onClick={handleLogout}
+            variant="ghost"
+            className="text-slate-500 hover:text-white hover:bg-slate-800 text-xs"
+          >
+            Cerrar sesión
+          </Button>
+        </div>
+      </div>
 
-              {colOrders.map((order) => (
+      {/* Board */}
+      <div className="p-6">
+        {ordersLoading ? (
+          <div className="text-center py-20 text-slate-600 text-sm animate-pulse">
+            Cargando pedidos...
+          </div>
+        ) : orders.length === 0 ? (
+          <div className="text-center py-20">
+            <div className="text-5xl mb-4">✅</div>
+            <p className="text-slate-400 font-medium">Sin pedidos activos</p>
+            <p className="text-slate-600 text-sm mt-1">Los nuevos pedidos aparecerán aquí automáticamente</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {orders.map((order) => {
+              const age = Math.floor(
+                (Date.now() - new Date(order.created_at).getTime()) / 60000
+              );
+              const isUrgent = age >= 15 && order.status === 'pending';
+
+              return (
                 <Card
                   key={order.id}
-                  className="bg-slate-900 border-y border-r border-slate-800 text-white shadow-md relative overflow-hidden"
-                  style={{ borderLeft: `4px solid ${col.borderColor}` }}
+                  className={`bg-slate-900 border flex flex-col ${
+                    isUrgent ? 'border-red-600' : 'border-slate-800'
+                  }`}
                 >
-                  <CardHeader className="pb-2 flex flex-row items-start justify-between">
-                    <div>
-                      <CardTitle className="text-lg font-black tracking-tight">
-                        Pedido #{getFriendlyId(order.id)}
-                      </CardTitle>
-                      <div className="text-xs text-slate-400 mt-1 font-medium">
-                        {order.customer?.full_name || 'Cliente'} • {formatTime(order.created_at)}
+                  {/* Card header */}
+                  <CardHeader className="pb-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-slate-500 text-xs font-mono">
+                          #{order.id.slice(-6).toUpperCase()}
+                        </p>
+                        <p className={`text-xs mt-0.5 font-medium ${isUrgent ? 'text-red-400' : 'text-slate-500'}`}>
+                          {age === 0 ? 'Ahora mismo' : `Hace ${age} min`}
+                          {isUrgent && ' ⚠️'}
+                        </p>
                       </div>
+                      <span
+                        className={`text-xs font-semibold px-2 py-1 rounded-full border ${STATUS_COLORS[order.status]}`}
+                      >
+                        {STATUS_LABELS[order.status]}
+                      </span>
                     </div>
-                    {!isCancelled && <TicketTimer createdAt={order.created_at} />}
                   </CardHeader>
 
-                  <CardContent>
-                    <div className="space-y-1.5 mb-4">
+                  {/* Items */}
+                  <CardContent className="flex-1 flex flex-col gap-3 pb-4">
+                    <div className="space-y-1.5">
                       {order.cart_snapshot?.map((item, i) => (
-                        <div key={i} className={`text-sm font-medium ${isCancelled ? 'line-through text-slate-500' : 'text-slate-200'}`}>
-                          <span className={isCancelled ? '' : 'text-white font-bold'}>{item.quantity}x</span> {item.name}
+                        <div key={i} className="flex items-baseline justify-between gap-2">
+                          <span className="text-white text-sm leading-snug">{item.name}</span>
+                          <span className="text-slate-400 text-sm font-semibold flex-shrink-0">
+                            ×{item.quantity}
+                          </span>
                         </div>
                       ))}
                     </div>
 
-                    <div className="flex gap-2 border-t border-slate-800 pt-3">
-                      {col.id === 'pending' && (
-                        <Button onClick={() => updateStatus(order.id, 'preparing')} size="sm" className="w-full bg-[#E63946] hover:bg-red-700 text-white font-bold">
-                          Preparar
-                        </Button>
-                      )}
-                      {col.id === 'preparing' && (
-                        <Button onClick={() => updateStatus(order.id, 'ready')} size="sm" className="w-full bg-[#F4A261] hover:bg-orange-500 text-slate-950 font-black">
-                          Terminar
-                        </Button>
-                      )}
-                      {col.id === 'ready' && (
-                        <Button onClick={() => updateStatus(order.id, 'delivered')} size="sm" className="w-full bg-[#06D6A0] hover:bg-emerald-500 text-slate-950 font-black">
-                          Completado ✓
-                        </Button>
-                      )}
-                      {isCancelled && (
-                        <div className="w-full text-center text-xs font-bold text-slate-500 uppercase tracking-widest pt-1">
-                          Auto-limpieza en 30m
-                        </div>
-                      )}
+                    <div className="pt-2 border-t border-slate-800 mt-auto">
+                      <p className="text-slate-500 text-xs truncate">{order.delivery_address}</p>
+                      <p className="text-slate-400 text-xs mt-0.5">
+                        Total: <span className="text-white font-semibold">C${order.total_amount.toLocaleString()}</span>
+                      </p>
                     </div>
+
+                    {/* Action button */}
+                    {NEXT_STATUS[order.status] && (
+                      <Button
+                        onClick={() => advanceStatus(order)}
+                        disabled={updatingId === order.id}
+                        className={`w-full mt-2 font-semibold text-sm py-2 ${
+                          order.status === 'pending'
+                            ? 'bg-yellow-600 hover:bg-yellow-500 text-white'
+                            : order.status === 'preparing'
+                            ? 'bg-blue-600 hover:bg-blue-500 text-white'
+                            : 'bg-green-700 hover:bg-green-600 text-white'
+                        }`}
+                      >
+                        {updatingId === order.id ? 'Actualizando...' : NEXT_STATUS_LABEL[order.status]}
+                      </Button>
+                    )}
                   </CardContent>
                 </Card>
-              ))}
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
+        )}
       </div>
-    </main>
+    </div>
   );
 }
