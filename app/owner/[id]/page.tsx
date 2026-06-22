@@ -45,6 +45,13 @@ export default function RestaurantMenuPage() {
   const [loading, setLoading] = useState(true);
   const [notOwner, setNotOwner] = useState(false);
 
+  // Staff state
+  const [staff, setStaff] = useState<{ id: string; user_id: string; email: string; invited_at: string | null; last_sign_in: string | null }[]>([]);
+  const [staffEmail, setStaffEmail] = useState('');
+  const [staffLoading, setStaffLoading] = useState(false);
+  const [staffError, setStaffError] = useState('');
+  const [staffSuccess, setStaffSuccess] = useState('');
+
   // Form state
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -89,6 +96,47 @@ export default function RestaurantMenuPage() {
     setRestaurant(rest);
     setItems(menu || []);
     setLoading(false);
+    loadStaff();
+  }
+
+  async function loadStaff() {
+    const { data, error } = await supabase.functions.invoke('list-staff', {
+      body: { restaurant_id: id },
+    });
+    if (!error && data?.staff) {
+      setStaff(data.staff);
+    }
+  }
+
+  async function inviteStaff(e: React.FormEvent) {
+    e.preventDefault();
+    setStaffLoading(true);
+    setStaffError('');
+    setStaffSuccess('');
+
+    const email = staffEmail.trim().toLowerCase();
+    if (!email) { setStaffLoading(false); return; }
+
+    // Call our edge function / admin API to invite the user
+    const { data, error } = await supabase.functions.invoke('invite-staff', {
+      body: { email, restaurant_id: id },
+    });
+
+    setStaffLoading(false);
+
+    if (error || data?.error) {
+      setStaffError(data?.error || error?.message || 'Error al invitar al staff.');
+    } else {
+      setStaffSuccess(data?.message || `Invitación enviada a ${email}`);
+      setStaffEmail('');
+      loadStaff();
+    }
+  }
+
+  async function removeStaff(membershipId: string) {
+    if (!confirm('¿Eliminar este miembro del staff?')) return;
+    await supabase.from('memberships').delete().eq('id', membershipId);
+    setStaff((prev) => prev.filter((s) => s.id !== membershipId));
   }
 
   // Group items by category
@@ -509,6 +557,97 @@ export default function RestaurantMenuPage() {
             ))}
           </div>
         )}
+        {/* ── Staff Management ───────────────────────────────── */}
+        <div className="mt-12">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h2 className="text-xl font-bold text-white">Staff del KDS</h2>
+              <p className="text-slate-500 text-sm mt-0.5">
+                Agrega el correo de tu personal de cocina — recibirán un enlace para configurar su acceso al KDS.
+              </p>
+            </div>
+          </div>
+
+          {/* Invite form */}
+          <Card className="bg-slate-900 border-slate-800 mb-6">
+            <CardContent className="pt-5">
+              <form onSubmit={inviteStaff} className="flex gap-3 items-start">
+                <div className="flex-1">
+                  <input
+                    type="email"
+                    required
+                    placeholder="correo@cocina.com"
+                    value={staffEmail}
+                    onChange={(e) => { setStaffEmail(e.target.value); setStaffError(''); setStaffSuccess(''); }}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:border-[#E63946]"
+                  />
+                  {staffError && (
+                    <p className="text-red-400 text-xs mt-2 bg-red-900/20 border border-red-800 rounded-lg px-3 py-2">
+                      {staffError}
+                    </p>
+                  )}
+                  {staffSuccess && (
+                    <p className="text-green-400 text-xs mt-2 bg-green-900/20 border border-green-800 rounded-lg px-3 py-2">
+                      ✓ {staffSuccess}
+                    </p>
+                  )}
+                </div>
+                <Button
+                  type="submit"
+                  disabled={staffLoading}
+                  className="bg-[#E63946] hover:bg-[#c1121f] text-white font-semibold px-5 py-2.5 flex-shrink-0"
+                >
+                  {staffLoading ? 'Enviando...' : 'Invitar'}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+
+          {/* Staff list */}
+          {staff.length === 0 ? (
+            <div className="text-center py-10 text-slate-600 text-sm border border-dashed border-slate-800 rounded-xl">
+              No hay staff agregado aún. Invita a alguien arriba.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {staff.map((member) => {
+                const hasLoggedIn = !!member.last_sign_in;
+                const isPending = !hasLoggedIn && !!member.invited_at;
+                return (
+                  <div
+                    key={member.id}
+                    className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded-xl px-4 py-3"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-slate-400 text-sm">
+                        👤
+                      </div>
+                      <div>
+                        <p className="text-white text-sm font-medium">{member.email}</p>
+                        <p className="text-xs mt-0.5">
+                          {hasLoggedIn ? (
+                            <span className="text-green-500">● Activo</span>
+                          ) : isPending ? (
+                            <span className="text-yellow-500">● Invitación pendiente</span>
+                          ) : (
+                            <span className="text-slate-600">● Sin actividad</span>
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => removeStaff(member.id)}
+                      className="text-slate-600 hover:text-red-400 text-xs px-2 py-1.5 rounded-lg hover:bg-red-900/20 transition-colors"
+                    >
+                      ✕ Eliminar
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
       </div>
     </div>
   );

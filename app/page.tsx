@@ -262,12 +262,7 @@ export default function KDSPage() {
               </Button>
             </form>
 
-            <p className="text-center text-slate-600 text-xs mt-6">
-              ¿Eres propietario?{' '}
-              <a href="/owner" className="text-slate-400 hover:text-white underline">
-                Ir al panel de propietario
-              </a>
-            </p>
+
           </CardContent>
         </Card>
       </div>
