@@ -45,6 +45,9 @@ export default function RestaurantMenuPage() {
   const [loading, setLoading] = useState(true);
   const [notOwner, setNotOwner] = useState(false);
 
+  // Stats
+  const [stats, setStats] = useState<{ todayOrders: number; todayRevenue: number; pending: number } | null>(null);
+
   // Staff state
   const [staff, setStaff] = useState<{ id: string; user_id: string; email: string; invited_at: string | null; last_sign_in: string | null }[]>([]);
   const [staffEmail, setStaffEmail] = useState('');
@@ -97,6 +100,31 @@ export default function RestaurantMenuPage() {
     setItems(menu || []);
     setLoading(false);
     loadStaff();
+    loadStats();
+  }
+
+  async function loadStats() {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const { data: todayData } = await supabase
+      .from('orders')
+      .select('total_amount, status')
+      .eq('restaurant_id', id)
+      .gte('created_at', today.toISOString())
+      .neq('status', 'cancelled');
+
+    const { data: pendingData } = await supabase
+      .from('orders')
+      .select('id')
+      .eq('restaurant_id', id)
+      .in('status', ['pending', 'preparing', 'ready']);
+
+    setStats({
+      todayOrders: todayData?.length || 0,
+      todayRevenue: todayData?.reduce((sum, o) => sum + (o.total_amount || 0), 0) || 0,
+      pending: pendingData?.length || 0,
+    });
   }
 
   async function loadStaff() {
@@ -315,6 +343,36 @@ export default function RestaurantMenuPage() {
           </div>
         </div>
       </div>
+
+      {/* Stats bar */}
+      {stats && (
+        <div className="border-b border-slate-800 bg-slate-900/50">
+          <div className="max-w-5xl mx-auto px-6 py-3 flex items-center gap-6">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-500 text-xs">Pedidos hoy</span>
+              <span className="text-white font-bold text-sm">{stats.todayOrders}</span>
+            </div>
+            <span className="text-slate-800">|</span>
+            <div className="flex items-center gap-2">
+              <span className="text-slate-500 text-xs">Ingresos hoy</span>
+              <span className="text-green-400 font-bold text-sm">C${stats.todayRevenue.toLocaleString()}</span>
+            </div>
+            <span className="text-slate-800">|</span>
+            <div className="flex items-center gap-2">
+              <span className="text-slate-500 text-xs">Pedidos activos</span>
+              <span className={`font-bold text-sm ${stats.pending > 0 ? 'text-yellow-400' : 'text-slate-400'}`}>
+                {stats.pending}
+              </span>
+            </div>
+            <button
+              onClick={loadStats}
+              className="ml-auto text-slate-600 hover:text-slate-400 text-xs transition-colors"
+            >
+              ↻ Actualizar
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="max-w-5xl mx-auto px-6 py-8">
         {/* Toolbar */}
