@@ -2,7 +2,8 @@ import { createClient } from "@supabase/supabase-js";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers":
+    "authorization, x-client-info, apikey, content-type",
 };
 
 Deno.serve(async (req: Request) => {
@@ -18,7 +19,10 @@ Deno.serve(async (req: Request) => {
     if (!email || !restaurant_id) {
       return new Response(
         JSON.stringify({ error: "Se requiere email y restaurant_id." }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
       );
     }
 
@@ -27,15 +31,21 @@ Deno.serve(async (req: Request) => {
     const callerClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: req.headers.get("Authorization")! } } }
+      {
+        global: {
+          headers: { Authorization: req.headers.get("Authorization")! },
+        },
+      },
     );
 
-    const { data: { user: caller } } = await callerClient.auth.getUser();
+    const {
+      data: { user: caller },
+    } = await callerClient.auth.getUser();
     if (!caller) {
-      return new Response(
-        JSON.stringify({ error: "No autenticado." }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: "No autenticado." }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     const { data: ownerMembership } = await callerClient
@@ -48,21 +58,26 @@ Deno.serve(async (req: Request) => {
 
     if (!ownerMembership) {
       return new Response(
-        JSON.stringify({ error: "No tienes permiso para invitar staff a este restaurante." }),
-        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({
+          error: "No tienes permiso para invitar staff a este restaurante.",
+        }),
+        {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
       );
     }
 
     // 3. Use the service role client for admin operations
     const adminClient = createClient(
       Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
     );
 
     // 4. Check if a user with this email already exists
     const { data: existingUsers } = await adminClient.auth.admin.listUsers();
     const existingUser = existingUsers?.users?.find(
-      (u) => u.email?.toLowerCase() === email.toLowerCase()
+      (u) => u.email?.toLowerCase() === email.toLowerCase(),
     );
 
     let staffUserId: string;
@@ -73,15 +88,22 @@ Deno.serve(async (req: Request) => {
     } else {
       // Invite them — they'll get an email to set their password
       const { data: inviteData, error: inviteError } =
+        // Fixed
         await adminClient.auth.admin.inviteUserByEmail(email, {
+          redirectTo: `${Deno.env.get("SITE_URL")}/auth/confirm`,
           data: { invited_as: "staff" },
         });
 
       if (inviteError || !inviteData?.user) {
         console.error("Invite error:", inviteError);
         return new Response(
-          JSON.stringify({ error: inviteError?.message || "Error al enviar invitación." }),
-          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          JSON.stringify({
+            error: inviteError?.message || "Error al enviar invitación.",
+          }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
         );
       }
 
@@ -105,8 +127,13 @@ Deno.serve(async (req: Request) => {
 
     if (existingMembership) {
       return new Response(
-        JSON.stringify({ error: "Este usuario ya es miembro de este restaurante." }),
-        { status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({
+          error: "Este usuario ya es miembro de este restaurante.",
+        }),
+        {
+          status: 409,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
       );
     }
 
@@ -117,10 +144,10 @@ Deno.serve(async (req: Request) => {
 
     if (membershipError) {
       console.error("Membership insert error:", membershipError);
-      return new Response(
-        JSON.stringify({ error: membershipError.message }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: membershipError.message }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     return new Response(
@@ -130,14 +157,19 @@ Deno.serve(async (req: Request) => {
           ? `${email} agregado como staff. Ya tiene cuenta y puede iniciar sesión.`
           : `Invitación enviada a ${email}. Recibirá un correo para configurar su acceso.`,
       }),
-      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
     );
-
   } catch (err) {
     console.error("Unexpected error:", err);
     return new Response(
       JSON.stringify({ error: "Error interno del servidor." }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
     );
   }
 });
