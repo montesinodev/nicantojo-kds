@@ -28,6 +28,11 @@ interface Restaurant {
   name: string;
 }
 
+interface Rider {
+  id: string;
+  full_name: string | null;
+}
+
 const STATUS_LABELS: Record<OrderStatus, string> = {
   pending: 'Pendiente',
   preparing: 'Preparando',
@@ -49,13 +54,11 @@ const STATUS_COLORS: Record<OrderStatus, string> = {
 const NEXT_STATUS: Partial<Record<OrderStatus, OrderStatus>> = {
   pending: 'preparing',
   preparing: 'ready',
-  ready: 'on_the_way',
 };
 
 const NEXT_STATUS_LABEL: Partial<Record<OrderStatus, string>> = {
   pending: 'Iniciar preparación',
   preparing: 'Marcar como listo',
-  ready: 'Entregar a repartidor',
 };
 
 const ACTIVE_STATUSES: OrderStatus[] = ['pending', 'preparing', 'ready'];
@@ -72,13 +75,18 @@ export default function OwnerKdsPage() {
   const [isLive, setIsLive] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
+  // Rider assignment state
+  const [riders, setRiders] = useState<Rider[]>([]);
+  const [assigningOrder, setAssigningOrder] = useState<Order | null>(null);
+  const [selectedRiderId, setSelectedRiderId] = useState<string>('');
+  const [assigning, setAssigning] = useState(false);
+
   // ── Auth + restaurant check ────────────────────────────────
   useEffect(() => {
     async function init() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { router.push('/owner'); return; }
 
-      // Verify they're an owner of this specific restaurant
       const { data: membership } = await supabase
         .from('memberships')
         .select('role, restaurants(id, name)')
@@ -95,6 +103,14 @@ export default function OwnerKdsPage() {
 
       setRestaurant(membership.restaurants as unknown as Restaurant);
       setLoading(false);
+
+      // Load available riders
+      const { data: riderData } = await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .eq('role', 'rider');
+
+      setRiders(riderData || []);
     }
 
     init();
@@ -150,6 +166,27 @@ export default function OwnerKdsPage() {
     loadOrders();
   }
 
+  async function assignRiderAndDispatch() {
+    if (!assigningOrder || !selectedRiderId) return;
+    setAssigning(true);
+
+    const { error } = await supabase
+      .from('orders')
+      .update({ status: 'on_the_way', rider_id: selectedRiderId })
+      .eq('id', assigningOrder.id);
+
+    setAssigning(false);
+
+    if (error) {
+      alert('Error al asignar repartidor: ' + error.message);
+      return;
+    }
+
+    setAssigningOrder(null);
+    setSelectedRiderId('');
+    loadOrders();
+  }
+
   // ── Loading ────────────────────────────────────────────────
   if (loading) {
     return (
@@ -159,7 +196,6 @@ export default function OwnerKdsPage() {
     );
   }
 
-  // ── Not owner ──────────────────────────────────────────────
   if (notOwner) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
@@ -169,11 +205,7 @@ export default function OwnerKdsPage() {
           <p className="text-slate-500 text-sm mb-6">
             No tienes permiso para ver el KDS de este restaurante.
           </p>
-          <Button
-            onClick={() => router.push('/owner')}
-            variant="ghost"
-            className="text-slate-400 hover:text-white"
-          >
+          <Button onClick={() => router.push('/owner')} variant="ghost" className="text-slate-400 hover:text-white">
             Volver al panel
           </Button>
         </div>
@@ -181,7 +213,6 @@ export default function OwnerKdsPage() {
     );
   }
 
-  // ── KDS board ──────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       {/* Header */}
@@ -200,14 +231,69 @@ export default function OwnerKdsPage() {
             <p className="text-slate-500 text-xs mt-0.5">KDS · Vista del propietario</p>
           </div>
         </div>
-
         <div className="flex items-center gap-2">
-          <span
-            className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}
-          />
+          <span className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
           <span className="text-xs text-slate-500">{isLive ? 'EN VIVO' : 'DESCONECTADO'}</span>
         </div>
       </div>
+
+      {/* Rider assignment modal */}
+      {assigningOrder && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-md">
+            <h2 className="text-white font-bold text-lg mb-1">Asignar Repartidor</h2>
+            <p className="text-slate-400 text-sm mb-5">
+              Pedido #{assigningOrder.id.slice(-6).toUpperCase()} · {assigningOrder.delivery_address}
+            </p>
+
+            {riders.length === 0 ? (
+              <div className="text-center py-6">
+                <p className="text-slate-400 text-sm">No hay repartidores registrados.</p>
+                <p className="text-slate-600 text-xs mt-1">
+                  Agrega repartidores desde el panel de administración.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2 mb-5">
+                {riders.map((rider) => (
+                  <button
+                    key={rider.id}
+                    onClick={() => setSelectedRiderId(rider.id)}
+                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border transition-colors ${
+                      selectedRiderId === rider.id
+                        ? 'border-[#E63946] bg-red-900/20 text-white'
+                        : 'border-slate-700 bg-slate-800 text-slate-300 hover:border-slate-600'
+                    }`}
+                  >
+                    <span className="text-xl">🛵</span>
+                    <span className="font-medium">{rider.full_name || 'Repartidor'}</span>
+                    {selectedRiderId === rider.id && (
+                      <span className="ml-auto text-[#E63946] font-bold">✓</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <Button
+                onClick={() => { setAssigningOrder(null); setSelectedRiderId(''); }}
+                variant="outline"
+                className="flex-1 border-slate-700 text-slate-300 hover:bg-slate-800"
+              >
+                Cancelar
+              </Button>
+              <Button
+                onClick={assignRiderAndDispatch}
+                disabled={!selectedRiderId || assigning}
+                className="flex-1 bg-[#E63946] hover:bg-red-700 text-white font-bold"
+              >
+                {assigning ? 'Asignando...' : 'Despachar →'}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Board */}
       <div className="p-6">
@@ -234,9 +320,7 @@ export default function OwnerKdsPage() {
               return (
                 <Card
                   key={order.id}
-                  className={`bg-slate-900 border flex flex-col ${
-                    isUrgent ? 'border-red-600' : 'border-slate-800'
-                  }`}
+                  className={`bg-slate-900 border flex flex-col ${isUrgent ? 'border-red-600' : 'border-slate-800'}`}
                 >
                   <CardHeader className="pb-2">
                     <div className="flex items-start justify-between gap-2">
@@ -249,9 +333,7 @@ export default function OwnerKdsPage() {
                           {isUrgent && ' ⚠️'}
                         </p>
                       </div>
-                      <span
-                        className={`text-xs font-semibold px-2 py-1 rounded-full border ${STATUS_COLORS[order.status]}`}
-                      >
+                      <span className={`text-xs font-semibold px-2 py-1 rounded-full border ${STATUS_COLORS[order.status]}`}>
                         {STATUS_LABELS[order.status]}
                       </span>
                     </div>
@@ -276,6 +358,7 @@ export default function OwnerKdsPage() {
                       </p>
                     </div>
 
+                    {/* pending and preparing: advance normally */}
                     {NEXT_STATUS[order.status] && (
                       <Button
                         onClick={() => advanceStatus(order)}
@@ -283,12 +366,20 @@ export default function OwnerKdsPage() {
                         className={`w-full mt-2 font-semibold text-sm py-2 ${
                           order.status === 'pending'
                             ? 'bg-yellow-600 hover:bg-yellow-500 text-white'
-                            : order.status === 'preparing'
-                            ? 'bg-blue-600 hover:bg-blue-500 text-white'
-                            : 'bg-green-700 hover:bg-green-600 text-white'
+                            : 'bg-blue-600 hover:bg-blue-500 text-white'
                         }`}
                       >
                         {updatingId === order.id ? 'Actualizando...' : NEXT_STATUS_LABEL[order.status]}
+                      </Button>
+                    )}
+
+                    {/* ready: assign rider before dispatching */}
+                    {order.status === 'ready' && (
+                      <Button
+                        onClick={() => { setAssigningOrder(order); setSelectedRiderId(''); }}
+                        className="w-full mt-2 font-semibold text-sm py-2 bg-green-700 hover:bg-green-600 text-white"
+                      >
+                        🛵 Asignar repartidor
                       </Button>
                     )}
                   </CardContent>
